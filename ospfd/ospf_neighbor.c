@@ -122,7 +122,7 @@ struct ospf_neighbor *ospf_nbr_new(struct ospf_interface *oi)
 	ospf_nbr_apply_rec4_params(nbr);
 
 	nbr->ls_rxmt_unacked = 0;
-
+	nbr->dead_timer_resets = 0;    /* rfc 4222 rec 2 */
 	return nbr;
 }
 

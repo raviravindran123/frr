@@ -660,6 +660,7 @@ static struct ospf_if_params *ospf_new_if_params(void)
     UNSET_IF_PARAM(oip, gap_high_water);
     UNSET_IF_PARAM(oip, gap_low_water);
     UNSET_IF_PARAM(oip, gap_max_lsas);
+	UNSET_IF_PARAM(oip, dead_timer_any);
 
 	oip->auth_crypt = list_new();
 
@@ -679,6 +680,8 @@ static struct ospf_if_params *ospf_new_if_params(void)
     oip->gap_high_water = OSPF_GAP_HIGH_WATER_DEFAULT;
     oip->gap_low_water = OSPF_GAP_LOW_WATER_DEFAULT;
     oip->gap_max_lsas = OSPF_GAP_MAX_LSAS_DEFAULT;
+	/* RFC4222 timers */
+	oip->dead_timer_any = false;
 
 	return oip;
 }
@@ -736,6 +739,7 @@ void ospf_free_if_params(struct interface *ifp, struct in_addr addr)
         !OSPF_IF_PARAM_CONFIGURED(oip, gap_adjust_int_ms) &&
         !OSPF_IF_PARAM_CONFIGURED(oip, gap_high_water) &&
         !OSPF_IF_PARAM_CONFIGURED(oip, gap_low_water) &&
+	    !OSPF_IF_PARAM_CONFIGURED(oip, dead_timer_any) &&
 	    listcount(oip->auth_crypt) == 0) {
 		ospf_del_if_params(ifp, oip);
 		rn->info = NULL;
