@@ -599,7 +599,7 @@ def test_lsa_pacing_defaults(tgen):
 # ---------------------------------------------------------------------------
 
 def test_lsa_pacing_config_persistence(tgen):
-    """Configure all params, write memory, verify saved to ospfd.conf."""
+    """Configure all params, write memory, verify saved to frr.conf."""
 
     if tgen.routers_have_failure():
         pytest.skip(tgen.errors)
@@ -621,10 +621,10 @@ def test_lsa_pacing_config_persistence(tgen):
 
     r1.vtysh_cmd("write memory")
 
-    saved = r1.run("cat /etc/frr/ospfd.conf")
+    saved = r1.run("cat /etc/frr/frr.conf")
 
     assert "ip ospf lsa-pacing" in saved, \
-        "ip ospf lsa-pacing not saved to ospfd.conf"
+        "ip ospf lsa-pacing not saved to frr.conf"
     assert "ip ospf lsa-pacing initial-gap 25" in saved, \
         "initial-gap not saved"
     assert "ip ospf lsa-pacing min-gap 8 max-gap 800" in saved, \
@@ -712,7 +712,7 @@ def test_lsa_pacing_frr_restart(tgen):
     time.sleep(2)
     r1.startDaemons(["ospfd"])
     time.sleep(2)
-    r1.run("vtysh -f /etc/frr/ospfd.conf")
+    r1.run("vtysh -f /etc/frr/frr.conf")
     time.sleep(3)
 
     running_config = r1.vtysh_cmd("show running-config")
