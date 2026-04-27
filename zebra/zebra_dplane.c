@@ -583,6 +583,9 @@ static struct zebra_dplane_globals {
 	/* Limit number of pending, unprocessed updates */
 	_Atomic uint32_t dg_max_queued_updates;
 
+	/* High-water mark for incoming queue length */
+	_Atomic uint32_t dg_incoming_q_max;
+
 	/* Control whether system route notifications should be produced. */
 	bool dg_sys_route_notifs;
 
@@ -3925,11 +3928,18 @@ int dplane_ctx_route_init(struct zebra_dplane_ctx *ctx, enum dplane_op_e op,
 		 * matters for INSTALL/UPDATE.
 		 */
 		if (zebra_nhg_kernel_nexthops_enabled() &&
-		    (((op == DPLANE_OP_ROUTE_INSTALL) ||
-		      (op == DPLANE_OP_ROUTE_UPDATE)) &&
+		    (((op == DPLANE_OP_ROUTE_INSTALL) || (op == DPLANE_OP_ROUTE_UPDATE)) &&
 		     !CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_INSTALLED) &&
-		     !CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_QUEUED)))
+		     !CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_QUEUED))) {
+			frrtrace(4, frr_zebra, dplane_ctx_route_kernel_nhg_not_ready, op, nhe->id,
+				 nhe->flags, re->vrf_id);
+			if (IS_ZEBRA_DEBUG_DPLANE_DETAIL || IS_ZEBRA_DEBUG_RIB_DETAILED)
+				zlog_debug("%s route %pRN op %s nhg id %u flags 0x%x nh %pNHs not installed nor queued",
+					   __func__, rn, dplane_op2str(op), nhe->id, nhe->flags,
+					   nhe->nhg.nexthop);
+
 			return ENOENT;
+		}
 	}
 #endif /* HAVE_NETLINK */
 
@@ -4574,6 +4584,11 @@ static int dplane_update_enqueue(struct zebra_dplane_ctx *ctx)
 	DPLANE_LOCK();
 	{
 		dplane_ctx_list_add_tail(&zdplane_info.dg_update_list, ctx);
+		curr = dplane_ctx_queue_count(&zdplane_info.dg_update_list);
+		high = atomic_load_explicit(&zdplane_info.dg_incoming_q_max, memory_order_relaxed);
+		if (curr > high)
+			atomic_store_explicit(&zdplane_info.dg_incoming_q_max, curr,
+					      memory_order_relaxed);
 	}
 	DPLANE_UNLOCK();
 
@@ -6435,9 +6450,11 @@ int dplane_show_provs_helper(struct vty *vty, bool detailed)
 	DPLANE_LOCK();
 	prov = dplane_prov_list_first(&zdplane_info.dg_providers);
 	in = dplane_ctx_queue_count(&zdplane_info.dg_update_list);
+	in_max = atomic_load_explicit(&zdplane_info.dg_incoming_q_max, memory_order_relaxed);
 	DPLANE_UNLOCK();
 
-	vty_out(vty, "dataplane Incoming Queue from Zebra: %" PRIu64 "\n", in);
+	vty_out(vty, "dataplane Incoming Queue from Zebra: %" PRIu64 ", q_max: %" PRIu64 "\n", in,
+		(uint64_t)in_max);
 	vty_out(vty, "Zebra dataplane providers:\n");
 
 	/* Show counters, useful info from each registered provider */
@@ -6468,7 +6485,9 @@ int dplane_show_provs_helper(struct vty *vty, bool detailed)
 	}
 
 	out = zebra_rib_dplane_results_count();
-	vty_out(vty, "dataplane Outgoing Queue to Zebra: %" PRIu64 "\n", out);
+	out_max = zebra_rib_dplane_results_max();
+	vty_out(vty, "dataplane Outgoing Queue to Zebra: %" PRIu64 ", q_max: %" PRIu64 "\n", out,
+		(uint64_t)out_max);
 
 	return CMD_SUCCESS;
 }

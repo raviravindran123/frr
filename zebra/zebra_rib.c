@@ -66,6 +66,7 @@ DEFINE_MTYPE_STATIC(ZEBRA, WQ_WRAPPER, "WQ wrapper");
 static pthread_mutex_t dplane_mutex;
 static struct event *t_dplane;
 static struct dplane_ctx_list_head rib_dplane_q;
+static _Atomic uint32_t rib_dplane_q_max;
 
 DEFINE_HOOK(rib_update, (struct route_node * rn, const char *reason),
 	    (rn, reason));
@@ -1552,8 +1553,7 @@ static bool rib_route_match_ctx(const struct route_entry *re,
 			 * kernel routes.
 			 */
 			if (re->type == ZEBRA_ROUTE_STATIC && !async &&
-			    (re->distance != dplane_ctx_get_old_distance(ctx) ||
-			     re->tag != dplane_ctx_get_old_tag(ctx))) {
+			    re->distance != dplane_ctx_get_old_distance(ctx)) {
 				result = false;
 			} else if (re->type == ZEBRA_ROUTE_KERNEL &&
 				   re->metric != dplane_ctx_get_old_metric(ctx)) {
@@ -1579,8 +1579,7 @@ static bool rib_route_match_ctx(const struct route_entry *re,
 			 * kernel routes.
 			 */
 			if (re->type == ZEBRA_ROUTE_STATIC && !async &&
-			    (re->distance != dplane_ctx_get_distance(ctx) ||
-			     re->tag != dplane_ctx_get_tag(ctx))) {
+			    re->distance != dplane_ctx_get_distance(ctx)) {
 				result = false;
 			} else if (re->type == ZEBRA_ROUTE_KERNEL &&
 				   re->metric != dplane_ctx_get_metric(ctx)) {
@@ -1840,6 +1839,78 @@ done:
 	return rn;
 }
 
+static void rib_process_result_import_table_add(struct route_node *rn, struct route_entry *re)
+{
+	struct zebra_vrf *zvrf;
+	rib_dest_t *dest;
+	const char *rmap_name;
+	afi_t afi;
+	safi_t safi;
+
+	if (!rn || !re)
+		return;
+
+	dest = rib_dest_from_rnode(rn);
+	if (!dest || re != dest->selected_fib)
+		return;
+
+	if (CHECK_FLAG(re->status, ROUTE_ENTRY_REMOVED) ||
+	    !CHECK_FLAG(re->status, ROUTE_ENTRY_INSTALLED))
+		return;
+
+	afi = family2afi(rn->p.family);
+	zvrf = zebra_vrf_lookup_by_id(re->vrf_id);
+	if (!zvrf)
+		return;
+
+	for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++) {
+		if (!is_zebra_import_table_enabled(afi, safi, re->vrf_id, re->table))
+			continue;
+
+		rmap_name = zebra_get_import_table_route_map(afi, safi, re->table);
+		zebra_add_import_table_entry(zvrf, safi, rn, re, rmap_name);
+	}
+}
+
+static void rib_process_result_import_table_del(const struct zebra_dplane_ctx *ctx)
+{
+	const struct nexthop_group *nhg;
+	const struct prefix *p;
+	struct zebra_vrf *zvrf;
+	afi_t afi;
+	safi_t safi;
+	uint32_t table_id;
+	uint32_t metric;
+	uint32_t nhe_id;
+	uint32_t flags;
+	uint8_t distance;
+
+	if (!ctx)
+		return;
+
+	afi = dplane_ctx_get_afi(ctx);
+	table_id = dplane_ctx_get_table(ctx);
+	p = dplane_ctx_get_dest(ctx);
+	zvrf = zebra_vrf_lookup_by_id(dplane_ctx_get_vrf(ctx));
+	if (!p || !zvrf || afi == AFI_MAX)
+		return;
+
+	nhg = dplane_ctx_get_ng(ctx);
+	metric = dplane_ctx_get_metric(ctx);
+	distance = dplane_ctx_get_distance(ctx);
+	nhe_id = dplane_ctx_get_nhe_id(ctx);
+	flags = dplane_ctx_get_flags(ctx);
+
+	for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++) {
+		if (!is_zebra_import_table_enabled(afi, safi, dplane_ctx_get_vrf(ctx), table_id))
+			continue;
+
+		rib_delete(afi, safi, zvrf->vrf->vrf_id, ZEBRA_ROUTE_TABLE, table_id, flags, p,
+			   NULL, nhg ? nhg->nexthop : NULL, nhe_id, zvrf->table_id, metric,
+			   distance, false);
+	}
+}
+
 
 /*
  * Route-update results processing after async dataplane update.
@@ -2010,6 +2081,8 @@ static void rib_process_result(struct zebra_dplane_ctx *ctx)
 				 */
 				re->nhe_installed_id = dplane_ctx_get_nhe_id(ctx);
 
+				rib_process_result_import_table_add(rn, re);
+
 				/* Redistribute if this is the selected re */
 				if (dest && re == dest->selected_fib)
 					redistribute_update(rn, re, old_re);
@@ -2076,6 +2149,7 @@ static void rib_process_result(struct zebra_dplane_ctx *ctx)
 				UNSET_FLAG(re->status, ROUTE_ENTRY_INSTALLED);
 				UNSET_FLAG(re->status, ROUTE_ENTRY_FAILED);
 			}
+			rib_process_result_import_table_del(ctx);
 			zsend_route_notify_owner_ctx(ctx, ZAPI_ROUTE_REMOVED);
 
 			if (zvrf)
@@ -2563,6 +2637,8 @@ static void process_subq_early_route_add(struct zebra_early_route *ere)
 				case NEXTHOP_TYPE_IPV4:
 				case NEXTHOP_TYPE_IPV6:
 				case NEXTHOP_TYPE_BLACKHOLE:
+					zlog_err("%s: unexpected EVPN nexthop type %u for route add %pFX",
+						 __func__, tmp_nh->type, &ere->p);
 					continue;
 				}
 				zebra_rib_queue_evpn_route_add(tmp_nh->vrf_id, &tmp_nh->rmac,
@@ -2701,18 +2777,19 @@ static void process_subq_early_route_add(struct zebra_early_route *ere)
 
 		/* Free up the evpn nhs of the re to be replaced.*/
 		for (ALL_NEXTHOPS(same->nhe->nhg, tmp_nh)) {
-			struct ipaddr vtep_ip;
-
 			if (CHECK_FLAG(tmp_nh->flags, NEXTHOP_FLAG_EVPN)) {
-				memset(&vtep_ip, 0, sizeof(struct ipaddr));
-				if (ere->afi == AFI_IP) {
+				struct ipaddr vtep_ip = {};
+
+				if (tmp_nh->type == NEXTHOP_TYPE_IPV4_IFINDEX) {
 					vtep_ip.ipa_type = IPADDR_V4;
-					memcpy(&(vtep_ip.ipaddr_v4), &(tmp_nh->gate.ipv4),
-					       sizeof(struct in_addr));
-				} else {
+					vtep_ip.ipaddr_v4 = tmp_nh->gate.ipv4;
+				} else if (tmp_nh->type == NEXTHOP_TYPE_IPV6_IFINDEX) {
 					vtep_ip.ipa_type = IPADDR_V6;
-					memcpy(&(vtep_ip.ipaddr_v6), &(tmp_nh->gate.ipv6),
-					       sizeof(struct in6_addr));
+					vtep_ip.ipaddr_v6 = tmp_nh->gate.ipv6;
+				} else {
+					zlog_err("%s: unexpected EVPN nexthop type %u for route update %pFX",
+						 __func__, tmp_nh->type, &ere->p);
+					continue;
 				}
 				zebra_rib_queue_evpn_route_del(tmp_nh->vrf_id, &vtep_ip, &ere->p);
 			}
@@ -2940,16 +3017,19 @@ static void process_subq_early_route_delete(struct zebra_early_route *ere)
 		 * uninstalled if no more refs.
 		 */
 		for (ALL_NEXTHOPS(re->nhe->nhg, tmp_nh)) {
-			struct ipaddr vtep_ip;
-
 			if (CHECK_FLAG(tmp_nh->flags, NEXTHOP_FLAG_EVPN)) {
-				memset(&vtep_ip, 0, sizeof(struct ipaddr));
-				if (ere->afi == AFI_IP) {
+				struct ipaddr vtep_ip = {};
+
+				if (tmp_nh->type == NEXTHOP_TYPE_IPV4_IFINDEX) {
 					vtep_ip.ipa_type = IPADDR_V4;
 					vtep_ip.ipaddr_v4 = tmp_nh->gate.ipv4;
-				} else {
+				} else if (tmp_nh->type == NEXTHOP_TYPE_IPV6_IFINDEX) {
 					vtep_ip.ipa_type = IPADDR_V6;
 					vtep_ip.ipaddr_v6 = tmp_nh->gate.ipv6;
+				} else {
+					zlog_err("%s: unexpected EVPN nexthop type %u for route delete %pFX",
+						 __func__, tmp_nh->type, &ere->p);
+					continue;
 				}
 				zebra_rib_queue_evpn_route_del(tmp_nh->vrf_id, &vtep_ip, &ere->p);
 			}
@@ -3229,13 +3309,29 @@ static int rib_meta_queue_nhg_process(struct meta_queue *mq, void *data,
 {
 	struct nhg_hash_entry *nhe = NULL;
 	uint8_t qindex = META_QUEUE_NHG;
-	struct wq_nhg_wrapper *w;
+	struct wq_nhg_wrapper *w, *ow;
+	struct listnode *node, *nnode;
 	uint64_t curr, high;
 
 	nhe = (struct nhg_hash_entry *)data;
 
 	if (!nhe)
 		return -1;
+
+	/* For NHG wrapper type, replace any existing queue entry with the
+	 * same nh id: keep the current NHE and remove the old one.
+	 */
+	for (ALL_LIST_ELEMENTS(mq->subq[qindex], node, nnode, ow)) {
+		if (ow->type == WQ_NHG_WRAPPER_TYPE_NHG && ow->u.nhe->id == nhe->id) {
+			list_delete_node(mq->subq[qindex], node);
+			mq->size--;
+			atomic_fetch_sub_explicit(&mq->total_metaq, 1, memory_order_relaxed);
+			atomic_fetch_sub_explicit(&mq->total_subq[qindex], 1, memory_order_relaxed);
+			zebra_nhg_free(ow->u.nhe);
+			XFREE(MTYPE_WQ_WRAPPER, ow);
+			break;
+		}
+	}
 
 	w = XCALLOC(MTYPE_WQ_WRAPPER, sizeof(struct wq_nhg_wrapper));
 
@@ -3863,9 +3959,6 @@ rib_dest_t *zebra_rib_create_dest(struct route_node *rn)
 static void rib_link(struct route_node *rn, struct route_entry *re)
 {
 	rib_dest_t *dest;
-	afi_t afi;
-	safi_t safi;
-	const char *rmap_name;
 
 	assert(re && rn);
 
@@ -3878,18 +3971,6 @@ static void rib_link(struct route_node *rn, struct route_entry *re)
 	}
 
 	re_list_add_head(&dest->routes, re);
-
-	afi = (rn->p.family == AF_INET)
-		      ? AFI_IP
-		      : (rn->p.family == AF_INET6) ? AFI_IP6 : AFI_MAX;
-	for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++) {
-		if (is_zebra_import_table_enabled(afi, safi, re->vrf_id, re->table)) {
-			struct zebra_vrf *zvrf = zebra_vrf_lookup_by_id(re->vrf_id);
-
-			rmap_name = zebra_get_import_table_route_map(afi, safi, re->table);
-			zebra_add_import_table_entry(zvrf, safi, rn, re, rmap_name);
-		}
-	}
 
 	rib_queue_add(rn);
 }
@@ -3943,9 +4024,6 @@ void rib_unlink(struct route_node *rn, struct route_entry *re)
 
 void rib_delnode(struct route_node *rn, struct route_entry *re)
 {
-	afi_t afi;
-	safi_t safi;
-
 	if (IS_ZEBRA_DEBUG_RIB)
 		rnode_debug(rn, re->vrf_id, "rn %p, re %p, removing",
 			    (void *)rn, (void *)re);
@@ -3954,22 +4032,6 @@ void rib_delnode(struct route_node *rn, struct route_entry *re)
 		route_entry_dump(&rn->p, NULL, re);
 
 	SET_FLAG(re->status, ROUTE_ENTRY_REMOVED);
-
-	afi = (rn->p.family == AF_INET)
-		      ? AFI_IP
-		      : (rn->p.family == AF_INET6) ? AFI_IP6 : AFI_MAX;
-	for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++) {
-		if (is_zebra_import_table_enabled(afi, safi, re->vrf_id, re->table)) {
-			struct zebra_vrf *zvrf = zebra_vrf_lookup_by_id(re->vrf_id);
-
-			zebra_del_import_table_entry(zvrf, safi, rn, re);
-			/* Just clean up if non main table */
-			if (IS_ZEBRA_DEBUG_RIB)
-				zlog_debug("%s %s(%u):%pRN: Freeing route rn %p, re %p (%s)",
-					   safi2str(safi), vrf_id_to_name(re->vrf_id), re->vrf_id,
-					   rn, rn, re, zebra_route_string(re->type));
-		}
-	}
 
 	rib_queue_add(rn);
 }
@@ -5120,8 +5182,14 @@ static int rib_dplane_results(struct dplane_ctx_list_head *ctxlist)
 {
 	/* Take lock controlling queue of results */
 	frr_with_mutex (&dplane_mutex) {
+		uint32_t q_count, q_high;
+
 		/* Enqueue context blocks */
 		dplane_ctx_list_append(&rib_dplane_q, ctxlist);
+		q_count = dplane_ctx_queue_count(&rib_dplane_q);
+		q_high = atomic_load_explicit(&rib_dplane_q_max, memory_order_relaxed);
+		if (q_count > q_high)
+			atomic_store_explicit(&rib_dplane_q_max, q_count, memory_order_relaxed);
 	}
 
 	/* Ensure event is signalled to zebra main pthread */
@@ -5140,6 +5208,11 @@ uint32_t zebra_rib_dplane_results_count(void)
 	}
 
 	return count;
+}
+
+uint32_t zebra_rib_dplane_results_max(void)
+{
+	return atomic_load_explicit(&rib_dplane_q_max, memory_order_relaxed);
 }
 
 /*

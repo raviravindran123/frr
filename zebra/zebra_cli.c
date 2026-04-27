@@ -120,6 +120,25 @@ static void zebra_route_map_delay_cli_write(struct vty *vty,
 	vty_out(vty, "zebra route-map delay-timer %u\n", delay);
 }
 
+static void zebra_allow_external_route_update_cli_write(struct vty *vty,
+							const struct lyd_node *dnode,
+							bool show_defaults)
+{
+	vty_out(vty, "allow-external-route-update\n");
+}
+
+DEFPY_YANG (allow_external_route_update,
+	    allow_external_route_update_cmd,
+	    "[no] allow-external-route-update",
+	    NO_STR
+	    "Allow FRR routes to be overwritten by external processes\n")
+{
+	nb_cli_enqueue_change(vty, "/frr-zebra:zebra/allow-external-route-update",
+			      no ? NB_OP_DESTROY : NB_OP_CREATE, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
 DEFPY_YANG (multicast_new,
 	multicast_new_cmd,
 	"[no] multicast <enable$on|disable$off>",
@@ -2792,6 +2811,10 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.cbs.cli_show = zebra_route_map_delay_cli_write,
 		},
 		{
+			.xpath = "/frr-zebra:zebra/allow-external-route-update",
+			.cbs.cli_show = zebra_allow_external_route_update_cli_write,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-addrs",
 			.cbs.cli_show = lib_interface_zebra_ipv4_addrs_cli_write,
 		},
@@ -3124,6 +3147,7 @@ void zebra_cli_init(void)
 	install_element(CONFIG_NODE, &ipv6_protocol_nht_rmap_cmd);
 	install_element(VRF_NODE, &ipv6_protocol_nht_rmap_cmd);
 	install_element(CONFIG_NODE, &zebra_route_map_timer_cmd);
+	install_element(CONFIG_NODE, &allow_external_route_update_cmd);
 
 	install_element(CONFIG_NODE, &ip_nht_default_route_cmd);
 	install_element(CONFIG_NODE, &ipv6_nht_default_route_cmd);

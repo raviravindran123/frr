@@ -1914,19 +1914,15 @@ static void interface_bridge_vlan_update(struct zebra_dplane_ctx *ctx,
 	uint16_t vid_range_start = 0;
 	int32_t i;
 
+	/* Could we have multiple bridge vlan infos? */
+	bvarray = dplane_ctx_get_ifp_bridge_vlan_info_array(ctx);
+	if (!bvarray)
+		return;
+
 	/* cache the old bitmap addrs */
 	old_vlan_bitmap = zif->vlan_bitmap;
 	/* create a new bitmap space for re-eval */
 	bf_init(zif->vlan_bitmap, IF_VLAN_BITMAP_MAX);
-
-	/* Could we have multiple bridge vlan infos? */
-	bvarray = dplane_ctx_get_ifp_bridge_vlan_info_array(ctx);
-	if (!bvarray) {
-		bf_free(zif->vlan_bitmap);
-		zif->vlan_bitmap = old_vlan_bitmap;
-
-		return;
-	}
 
 	for (i = 0; i < bvarray->count; i++) {
 		bvinfo = bvarray->array[i];
@@ -2135,10 +2131,14 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 			if (protodown_set) {
 				interface_if_protodown(ifp, protodown,
 						       rc_bitfield);
+				/* Track kernel protodown state */
+				if (protodown)
+					SET_FLAG(zif->flags, ZIF_FLAG_KERNEL_PROTODOWN_SET);
+				else
+					UNSET_FLAG(zif->flags, ZIF_FLAG_KERNEL_PROTODOWN_SET);
 				if (startup)
 					if_sweep_protodown(zif);
 			}
-
 			if (IS_ZEBRA_IF_BRIDGE(ifp)) {
 				if (IS_ZEBRA_DEBUG_KERNEL)
 					zlog_debug(
@@ -2215,14 +2215,29 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 			/* Update interface type */
 			ifp->zif_type = zif_type;
 
-			if (protodown_set)
+			/* Detect kernel protodown transition from set to cleared */
+			bool kernel_pd_was_set;
+			bool kernel_pd_cleared = false;
+
+			kernel_pd_was_set = CHECK_FLAG(zif->flags, ZIF_FLAG_KERNEL_PROTODOWN_SET);
+
+			if (protodown_set) {
 				interface_if_protodown(ifp, protodown,
 						       rc_bitfield);
+				/* Track kernel protodown state and detect transition */
+				if (protodown)
+					SET_FLAG(zif->flags, ZIF_FLAG_KERNEL_PROTODOWN_SET);
+				else {
+					if (kernel_pd_was_set)
+						kernel_pd_cleared = true;
+					UNSET_FLAG(zif->flags, ZIF_FLAG_KERNEL_PROTODOWN_SET);
+				}
+			}
 
 			if (if_is_no_ptm_operative(ifp)) {
-				ifp->flags = flags;
 				bool is_up = if_is_operative(ifp);
 
+				ifp->flags = flags;
 				if (!if_is_no_ptm_operative(ifp) ||
 				    CHECK_FLAG(zif->flags,
 					       ZIF_FLAG_PROTODOWN)) {
@@ -2242,12 +2257,12 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 					 * interface status.
 					 */
 					if (IS_ZEBRA_DEBUG_KERNEL)
-						zlog_debug(
-							"Intf %s(%u) PTM up, notifying clients",
-							name, ifp->ifindex);
+						zlog_debug("Intf %s(%u) PTM up, notifying clients is_up:%d pd_cleared:%d",
+							   name, ifp->ifindex, is_up,
+							   kernel_pd_cleared);
 					frrtrace(3, frr_zebra, if_dplane_ifp_handling, name,
 						 ifp->ifindex, 2);
-					if_up(ifp, is_up);
+					if_up(ifp, kernel_pd_cleared || !is_up);
 
 					/*
 					 * Update EVPN VNI when SVI MAC change

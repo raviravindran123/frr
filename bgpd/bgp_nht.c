@@ -278,7 +278,7 @@ void bgp_unlink_nexthop_by_peer(struct peer *peer)
 		 * Gather the ifindex for if up/down events to be
 		 * tagged into this fun
 		 */
-		if (afi == AFI_IP6 &&
+		if (afi == AFI_IP6 && peer->conf_if &&
 		    IN6_IS_ADDR_LINKLOCAL(&peer->connection->su.sin6.sin6_addr))
 			ifindex = peer->connection->su.sin6.sin6_scope_id;
 		bnc = bnc_find(&peer->bgp->nexthop_cache_table[afi], &p, 0,
@@ -342,8 +342,16 @@ int bgp_find_or_add_nexthop(struct bgp *bgp_route, struct bgp *bgp_nexthop, afi_
 		 * NH could be set to different v6 LL address (compared to
 		 * peer's LL) using route-map. In such a scenario, do not set
 		 * the ifindex.
+		 *
+		 * Only do this for dynamic LL peers (conf_if set) where
+		 * scope_id is populated early from ifp->ifindex.  For
+		 * explicit LL peers (conf_if NULL, e.g. "neighbor fe80::X
+		 * interface swpN") the scope_id arrives only after the TCP
+		 * handshake; using it here would create a BNC keyed with the
+		 * real ifindex while peer-tracking already created one with
+		 * ifindex 0, causing a stale NHT entry after session flaps.
 		 */
-		if (afi == AFI_IP6 &&
+		if (afi == AFI_IP6 && pi->peer->conf_if &&
 		    IN6_IS_ADDR_LINKLOCAL(
 			    &pi->peer->connection->su.sin6.sin6_addr) &&
 		    IPV6_ADDR_SAME(&pi->peer->connection->su.sin6.sin6_addr,
@@ -549,7 +557,8 @@ void bgp_delete_connected_nexthop(afi_t afi, struct peer *peer)
 		 * Gather the ifindex for if up/down events to be
 		 * tagged into this fun
 		 */
-		if (afi == AFI_IP6 && IN6_IS_ADDR_LINKLOCAL(&peer->connection->su.sin6.sin6_addr))
+		if (afi == AFI_IP6 && peer->conf_if &&
+		    IN6_IS_ADDR_LINKLOCAL(&peer->connection->su.sin6.sin6_addr))
 			ifindex = peer->connection->su.sin6.sin6_scope_id;
 		bnc = bnc_find(&peer->bgp->nexthop_cache_table[family2afi(p.family)], &p, 0,
 			       ifindex);
@@ -808,8 +817,8 @@ static void bgp_nht_ifp_table_handle(struct bgp *bgp,
 	}
 
 	frr_each (bgp_nexthop_cache, table, bnc) {
-		if ((bnc->nexthop_num == 1 && bnc->nexthop &&
-		     bnc->nexthop->ifindex != ifp->ifindex) &&
+		if (!(bnc->nexthop_num == 1 && bnc->nexthop &&
+		      bnc->nexthop->ifindex == ifp->ifindex) &&
 		    (bnc->ifindex_ipv6_ll != ifp->ifindex))
 			continue;
 
@@ -1518,7 +1527,8 @@ void evaluate_paths(struct bgp_nexthop_cache *bnc)
 		if (old_path_valid != bnc_is_valid_nexthop)
 			hook_call(bgp_nht_path_update, bgp_path, path, bnc_is_valid_nexthop);
 
-		if (CHECK_FLAG(bnc->change_flags, BGP_NEXTHOP_METRIC_CHANGED) ||
+		if (old_path_valid != bnc_is_valid_nexthop ||
+		    CHECK_FLAG(bnc->change_flags, BGP_NEXTHOP_METRIC_CHANGED) ||
 		    CHECK_FLAG(bnc->change_flags, BGP_NEXTHOP_CHANGED))
 			bgp_process(bgp_path, dest, path, afi, safi);
 	}

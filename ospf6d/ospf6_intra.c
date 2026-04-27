@@ -1532,6 +1532,7 @@ void ospf6_intra_prefix_route_ecmp_path(struct ospf6_area *oa,
 
 			for (ALL_LIST_ELEMENTS_RO(old_route->paths, anode,
 						  o_path)) {
+				ifp = NULL;
 				ls_entry = ospf6_route_lookup(
 							&o_path->ls_prefix,
 							oa->spf_table);
@@ -1713,6 +1714,8 @@ void ospf6_intra_prefix_lsa_add(struct ospf6_lsa *lsa)
 			ls_entry->path.cost + ntohs(op->prefix_metric);
 		memcpy(&route->path.ls_prefix, &ls_prefix,
 		       sizeof(struct prefix));
+		if (ls_entry->connected)
+			route->connected = true;
 		if (direct_connect) {
 			ifp = if_lookup_prefix(&route->prefix,
 					       oa->ospf6->vrf_id);
@@ -1775,7 +1778,7 @@ static void ospf6_intra_prefix_lsa_remove_update_route(struct ospf6_lsa *lsa,
 	bool nh_updated = false;
 	char buf[PREFIX2STR_BUFFER];
 
-	/* Iterate all paths of route to find maching
+	/* Iterate all paths of route to find matching
 	 * with LSA remove info.
 	 * If route->path is same, replace
 	 * from paths list.

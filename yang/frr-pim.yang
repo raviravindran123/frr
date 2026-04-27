@@ -270,6 +270,14 @@ module frr-pim {
         "RP keep alive Timer in seconds.";
     }
 
+    leaf gm-watermark-limit {
+      type uint16 {
+        range "1..max";
+      }
+      description
+        "Group count threshold for IGMP/MLD watermark warnings.";
+    }
+
     leaf send-v6-secondary {
       when "../frr-pim:address-family = 'frr-rt:ipv4'" {
         description
@@ -681,6 +689,19 @@ module frr-pim {
       default "false";
       description
         "Mark interface as Active-Active for MLAG operations.";
+    }
+
+    leaf allow-rp {
+      type boolean;
+      default "false";
+      description
+        "Ignore mismatched RP addresses when processing (*,G) Joins.";
+    }
+
+    leaf allow-rp-rp-list {
+      type plist-ref;
+      description
+        "Prefix-list which the RP address must match to be accepted.";
     }
 
     leaf dr-priority {

@@ -21,6 +21,7 @@
 #include "termtable.h"
 #include "affinitymap.h"
 #include "frrdistance.h"
+#include "workqueue.h"
 #include "lib/frrscript.h"
 
 #include "zebra/zebra_router.h"
@@ -2713,27 +2714,6 @@ static void vty_show_ip_route_summary_prefix(struct vty *vty,
 	}
 }
 
-DEFUN (allow_external_route_update,
-       allow_external_route_update_cmd,
-       "allow-external-route-update",
-       "Allow FRR routes to be overwritten by external processes\n")
-{
-	zrouter.allow_delete = true;
-
-	return CMD_SUCCESS;
-}
-
-DEFUN (no_allow_external_route_update,
-       no_allow_external_route_update_cmd,
-       "no allow-external-route-update",
-       NO_STR
-       "Allow FRR routes to be overwritten by external processes\n")
-{
-	zrouter.allow_delete = false;
-
-	return CMD_SUCCESS;
-}
-
 /* show vrf */
 DEFUN (show_vrf,
        show_vrf_cmd,
@@ -4091,7 +4071,7 @@ DEFUN (show_zebra,
 		       zrouter.zav.supports_nhgs ? "Available" : "Unavailable");
 
 	ttable_add_row(table, "Allow Non FRR route deletion|%s",
-		       zrouter.allow_delete ? "Yes" : "No");
+		       zrouter.allow_delete ? "No" : "Yes");
 	ttable_add_row(table, "v4 All LinkDown Routes|%s",
 		       zrouter.all_linkdownv4 ? "On" : "Off");
 	ttable_add_row(table, "v4 Default LinkDown Routes|%s",
@@ -4262,6 +4242,26 @@ DEFUN (zebra_show_routing_tables_summary,
        "Summary Information\n")
 {
 	zebra_router_show_table_summary(vty);
+
+	return CMD_SUCCESS;
+}
+
+DEFPY_HIDDEN(zebra_test_metaq_plug,
+	     zebra_test_metaq_plug_cmd,
+	     "[no] zebra test metaq disable",
+	     NO_STR
+	     ZEBRA_STR
+	     "Test command\n"
+	     "Meta queue\n"
+	     "Plug the meta queue (prevent processing)\n")
+{
+	if (zrouter.ribq == NULL)
+		return CMD_WARNING;
+
+	if (no)
+		work_queue_unplug(zrouter.ribq);
+	else
+		work_queue_plug(zrouter.ribq);
 
 	return CMD_SUCCESS;
 }
@@ -4464,9 +4464,6 @@ void zebra_vty_init(void)
 	install_node(&ip_node);
 	install_node(&protocol_node);
 
-	install_element(CONFIG_NODE, &allow_external_route_update_cmd);
-	install_element(CONFIG_NODE, &no_allow_external_route_update_cmd);
-
 	install_element(CONFIG_NODE, &zebra_nexthop_group_keep_cmd);
 	install_element(CONFIG_NODE, &ip_zebra_import_table_distance_cmd);
 	install_element(CONFIG_NODE, &ipv6_zebra_import_table_distance_cmd);
@@ -4549,6 +4546,7 @@ void zebra_vty_init(void)
 	install_element(CONFIG_NODE, &zebra_dplane_queue_limit_cmd);
 	install_element(CONFIG_NODE, &no_zebra_dplane_queue_limit_cmd);
 	install_element(VIEW_NODE, &show_zebra_metaq_counters_cmd);
+	install_element(VIEW_NODE, &zebra_test_metaq_plug_cmd);
 
 #ifdef HAVE_NETLINK
 	install_element(CONFIG_NODE, &zebra_kernel_netlink_batch_tx_buf_cmd);

@@ -236,6 +236,7 @@ void pim_if_delete(struct interface *ifp)
 		XFREE(MTYPE_TMP, pim_ifp->bfd_config.profile);
 
 	XFREE(MTYPE_PIM_PLIST_NAME, pim_ifp->nbr_plist);
+	XFREE(MTYPE_PIM_PLIST_NAME, pim_ifp->allow_rp_plist);
 	XFREE(MTYPE_PIM_INTERFACE, pim_ifp);
 
 	ifp->info = NULL;
@@ -1061,7 +1062,7 @@ int pim_if_del_vif(struct interface *ifp)
 	return 0;
 }
 
-// DBS - VRF Revist
+// DBS - VRF Revisit
 struct interface *pim_if_find_by_vif_index(struct pim_instance *pim,
 					   ifindex_t vif_index)
 {

@@ -346,11 +346,10 @@ static unsigned int updgrp_hash_key_make(const void *p)
 	key = 0;
 
 	/* `remote-as auto` technically uses identical peer->sort.
-	 * After OPEN message is parsed, this is updated accordingly, but
-	 * we need to call the peer_sort() here also to properly create
-	 * separate subgroups.
+	 * After OPEN message is parsed, peer->sort is updated accordingly in
+	 * update_group_create, so we directly use it.
 	 */
-	key = jhash_1word(peer_sort((struct peer *)peer), key);
+	key = jhash_1word(peer->sort, key);
 	key = jhash_1word(peer->sub_sort, key); /* OAD */
 	key = jhash_1word((peer->flags & PEER_UPDGRP_FLAGS), key);
 	key = jhash_1word((flags & PEER_UPDGRP_AF_FLAGS), key);
@@ -472,6 +471,10 @@ static unsigned int updgrp_hash_key_make(const void *p)
 	if (afi == AFI_IP6 &&
 	    (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_NEXTHOP_LOCAL_UNCHANGED)))
 		key = jhash(&peer->nexthop.v6_global, IPV6_MAX_BYTELEN, key);
+
+	key = jhash_1word(CHECK_FLAG(peer->af_flags[AFI_BGP_LS][SAFI_BGP_LS], PEER_FLAG_BGP_LS_IPV4), key);
+
+	key = jhash_1word(CHECK_FLAG(peer->af_flags[AFI_BGP_LS][SAFI_BGP_LS], PEER_FLAG_BGP_LS_IPV6), key);
 
 	/*
 	 * ANY NEW ITEMS THAT ARE ADDED TO THE key, ENSURE DEBUG
@@ -1085,6 +1088,8 @@ static struct update_group *update_group_create(struct peer_af *paf)
 	struct update_group tmp;
 	struct peer tmp_conf;
 	struct peer_connection tmp_connection;
+
+	(void)peer_sort(paf->peer);
 
 	memset(&tmp, 0, sizeof(tmp));
 	memset(&tmp_conf, 0, sizeof(tmp_conf));
