@@ -108,7 +108,7 @@ MAX_LSAS = 1          # one LSA per LSU — clean 1:1 timing
 ADJINT_MS = 60000     # freeze gap adjuster
 
 # Link shaping — 100 Kbps
-LINK_RATE = "10kbit"
+LINK_RATE = "100kbit"
 LINK_BURST = "4kb"
 LINK_LATENCY = "100ms"
 R1_ETH1 = "eth1"   # interface name inside R1's network namespace
@@ -132,10 +132,16 @@ def build_topo(tgen):
 # Module-level setup / teardown
 # ---------------------------------------------------------------------------
 
-def setup_module(mod):
-    logger.info("RFC4222 R4 congested link test: R1 --[100Kbps]--> R2")
+def teardown_module():
+    """Placeholder — topology is destroyed per test in teardown_function."""
+    pass
 
-    tgen = Topogen(build_topo, mod.__name__)
+
+def _setup_topology(test_name):
+    """Create and start a fresh topology for one test function."""
+    logger.info("RFC4222 R4 congested link test: R1 --[100Kbps]--> R2 [%s]", test_name)
+
+    tgen = Topogen(build_topo, test_name)
     tgen.start_topology()
 
     for _, router in tgen.routers().items():
@@ -143,9 +149,6 @@ def setup_module(mod):
 
     tgen.start_router()
 
-    # Shape R1's eth1 to 100 Kbps using tbf (token bucket filter).
-    # This limits the outbound rate from R1, creating a realistic
-    # congested-link scenario without needing physical hardware.
     r1 = tgen.gears["r1"]
     r1.cmd(
         "tc qdisc add dev {} root handle 1: tbf "
@@ -156,7 +159,6 @@ def setup_module(mod):
     logger.info("R1 %s shaped to %s (burst=%s latency=%s)",
                 R1_ETH1, LINK_RATE, LINK_BURST, LINK_LATENCY)
 
-    # Enable redistribution so static routes become Type-5 LSAs
     r1.vtysh_cmd(
         "configure terminal\n"
         "router ospf\n"
@@ -164,13 +166,10 @@ def setup_module(mod):
         "end"
     )
 
-    # Start pcap on R1's eth1 only
     global PM
     PM = PerInterfacePcapManager(outdir="pcaps", tag="congested")
     PM.start_all(tgen)
 
-    # Stop captures on R2 — only R1's view is needed
-    r2 = tgen.gears["r2"]
     for (rname, ifn), pid in list(PM.pids.items()):
         if rname != "r1":
             router = tgen.routers().get(rname)
@@ -183,12 +182,22 @@ def setup_module(mod):
     time.sleep(12)
 
 
-def teardown_module():
+def _teardown_topology():
+    """Stop pcap and destroy the topology created by _setup_topology."""
     tgen = get_topogen()
     global PM
     if PM:
         PM.stop_all(tgen)
+        PM = None
     tgen.stop_topology()
+
+
+def setup_function(func):
+    _setup_topology(func.__name__)
+
+
+def teardown_function():
+    _teardown_topology()
 
 
 # ---------------------------------------------------------------------------

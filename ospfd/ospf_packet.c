@@ -399,11 +399,8 @@ static void ospf_r4_nbr_arm_timer(struct ospf_neighbor *nbr)
 		return;
 	uint64_t now_ms = ospf_now_ms();
 	long delay_ms = (nbr->next_send_ms > now_ms)
-				? (long)(nbr->next_send_ms - now_ms)
-				: 0;
-	zlog_debug("R4: arm send timer nbr=%pI4 delay=%ld ms queue=%u",
-		   &nbr->router_id, delay_ms,
-		   listcount(nbr->r4_send_queue));
+					? (long)(nbr->next_send_ms - now_ms)
+					: 0;
 	event_add_timer_msec(master, ospf_r4_nbr_send_timer, nbr, delay_ms,
 			     &nbr->t_r4_send);
 }
@@ -415,9 +412,6 @@ static void ospf_r4_nbr_arm_timer(struct ospf_neighbor *nbr)
 void ospf_r4_nbr_enqueue(struct ospf_neighbor *nbr, struct ospf_lsa *lsa)
 {
 	listnode_add(nbr->r4_send_queue, ospf_lsa_lock(lsa));
-	zlog_debug("R4: enqueue LSA [Type%d:%pI4] nbr=%pI4 queue=%u",
-		   lsa->data->type, &lsa->data->id,
-		   &nbr->router_id, listcount(nbr->r4_send_queue));
 	ospf_r4_nbr_arm_timer(nbr);
 }
 
@@ -2548,9 +2542,6 @@ static void ospf_ls_ack(struct ip *iph, struct ospf_header *ospfh,
 		lsa = ospf_lsa_new();
 		lsa->data = (struct lsa_header *)stream_pnt(s);
 		lsa->vrf_id = oi->ospf->vrf_id;
-		zlog_debug("ACK_LSA: Processing ACK for LSA ID=%pI4 type=%d seq=0x%08x from %pI4",
-			   &lsa->data->id, lsa->data->type, ntohl(lsa->data->ls_seqnum),
-			   &nbr->router_id);
 
 		/* lsah = (struct lsa_header *) stream_pnt (s); */
 		size -= OSPF_LSA_HEADER_SIZE;
@@ -2558,8 +2549,6 @@ static void ospf_ls_ack(struct ip *iph, struct ospf_header *ospfh,
 
 		if (lsa->data->type < OSPF_MIN_LSA
 		    || lsa->data->type >= OSPF_MAX_LSA) {
-			zlog_debug("ACK_INVALID: Invalid LSA type %d for LSA %pI4, discarding",
-				   lsa->data->type, &lsa->data->id);
 			lsa->data = NULL;
 			ospf_lsa_discard(lsa);
 			continue;
@@ -2567,30 +2556,13 @@ static void ospf_ls_ack(struct ip *iph, struct ospf_header *ospfh,
 
 		lsr = ospf_ls_retransmit_lookup(nbr, lsa);
 
-		if (lsr != NULL) {
-			int more_recent_result = ospf_lsa_more_recent(lsr, lsa);
-			zlog_debug("ACK_FOUND: Found LSA %pI4 in retrans list. more_recent=%d (0=same, >0=lsr newer, <0=lsa newer)",
-				   &lsa->data->id, more_recent_result);
-			if (more_recent_result == 0) {
-				zlog_debug("ACK_MATCH: LSA %pI4 seq=0x%08x matches, removing from retrans list unacked count =%u",
-					   &lsa->data->id, ntohl(lsa->data->ls_seqnum),
-					   nbr->ls_rxmt_unacked);
-				ospf_ls_retransmit_delete(nbr, lsr);
-				acked_any = true;
-				/* RFC4222/R5: Trigger dynamic adjacency pacing adjustment */
-				if (nbr->oi->adj_pacing.mode == OSPF_ADJ_PACING_DYNAMIC)
-					ospf_adj_dyn_adjust(nbr->oi);
-				ospf_check_and_gen_init_seq_lsa(oi, lsa);
-
-
-			} else {
-				zlog_debug("ACK_MISMATCH: LSA %pI4 found but different version (retrans_seq=0x%08x vs ack_seq=0x%08x)",
-					   &lsa->data->id, ntohl(lsr->data->ls_seqnum),
-					   ntohl(lsa->data->ls_seqnum));
-			}
-		} else {
-			zlog_debug("ACK_NOTFOUND: LSA %pI4 seq=0x%08x not found in retrans list (already removed or never sent)",
-				   &lsa->data->id, ntohl(lsa->data->ls_seqnum));
+		if (lsr != NULL && ospf_lsa_more_recent(lsr, lsa) == 0) {
+			ospf_ls_retransmit_delete(nbr, lsr);
+			acked_any = true;
+			/* RFC4222/R5: Trigger dynamic adjacency pacing adjustment */
+			if (nbr->oi->adj_pacing.mode == OSPF_ADJ_PACING_DYNAMIC)
+				ospf_adj_dyn_adjust(nbr->oi);
+			ospf_check_and_gen_init_seq_lsa(oi, lsa);
 		}
 
 		lsa->data = NULL;
@@ -4486,8 +4458,6 @@ static void ospf_r4_nbr_send_timer(struct event *t)
 	    delay_ms = nbr->next_send_ms - now_ms;
 	    event_add_timer_msec(master, ospf_r4_nbr_send_timer, nbr,
 	                         (long)delay_ms, &nbr->t_r4_send);
-            zlog_debug("R4: Respect pacing gate nbr=%pI4 delay=%" PRIu64,
-                       &nbr->router_id, delay_ms);
 	    return;
 	}
 	
@@ -4496,11 +4466,9 @@ static void ospf_r4_nbr_send_timer(struct event *t)
 	    uint64_t backoff = nbr->lsu_gap_ms;
 	    if (backoff < oi->rec4_gap_min_ms)
 	        backoff = oi->rec4_gap_min_ms;
-	
+
 	    event_add_timer_msec(master, ospf_r4_nbr_send_timer, nbr,
 	                         (long)backoff, &nbr->t_r4_send);
-            zlog_debug("R4: write_q backpressure nbr=%pI4 delay=%" PRIu64,
-                       &nbr->router_id, backoff);
 	    return;
 	}
 	
