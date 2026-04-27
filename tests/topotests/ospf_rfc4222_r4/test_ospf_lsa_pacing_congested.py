@@ -108,7 +108,7 @@ MAX_LSAS = 1          # one LSA per LSU — clean 1:1 timing
 ADJINT_MS = 60000     # freeze gap adjuster
 
 # Link shaping — 100 Kbps
-LINK_RATE = "100kbit"
+LINK_RATE = "10kbit"
 LINK_BURST = "4kb"
 LINK_LATENCY = "100ms"
 R1_ETH1 = "eth1"   # interface name inside R1's network namespace
